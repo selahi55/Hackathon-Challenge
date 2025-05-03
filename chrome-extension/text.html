@@ -1,302 +1,281 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Your Bunq Mate</title>
+    <title>Audio Stream + Screen Snapshots (Single Script)</title>
     <meta charset="UTF-8">
     <style>
-        body {
-            font-family: sans-serif;
-            padding: 1em;
-            line-height: 1.5;
-            background-color: #f4f4f4;
-        }
-        #container {
-            background-color: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            max-width: 600px;
-            margin: 20px auto;
-        }
-        h1 {
-            text-align: center;
-            color: #333;
-        }
-        video {
-            border: 1px solid #ccc;
-            max-width: 100%;
-            height: auto;
-            margin-top: 15px;
-            background-color: #eee;
-            display: block; 
-        }
-        button {
-            margin: 10px 5px 10px 0;
-            padding: 10px 18px;
-            cursor: pointer;
-            border: none;
-            border-radius: 4px;
-            font-size: 1em;
-        }
-        #startButton {
-            background-color: #28a745;
-            color: white;
-        }
-        #startButton:disabled {
-            background-color: #9fd8ac;
-        }
-        #stopButton {
-            background-color: #dc3545;
-            color: white;
-        }
-         #stopButton:disabled {
-            background-color: #f1a1ab;
-        }
-        #status {
-            margin-top: 15px;
-            padding: 10px;
-            border-radius: 4px;
-            font-weight: bold;
-            min-height: 1.2em;
-            background-color: #e9ecef;
-            border: 1px solid #ced4da;
-            text-align: center;
-        }
-        .error {
-             color: #721c24;
-             background-color: #f8d7da;
-             border-color: #f5c6cb;
-        }
-        .success {
-            color: #155724;
-            background-color: #d4edda;
-            border-color: #c3e6cb;
-        }
-         .info {
-            color: #0c5460;
-            background-color: #d1ecf1;
-            border-color: #bee5eb;
-        }
+        /* (Keep CSS the same) */
+        body { font-family: sans-serif; padding: 1em; line-height: 1.5; background-color: #f4f4f4; }
+        #container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; margin: 20px auto; }
+        h1 { text-align: center; color: #333; }
+        video { border: 1px solid #ccc; max-width: 100%; height: auto; margin-top: 15px; background-color: #eee; display: block; }
+        button { margin: 10px 5px 10px 0; padding: 10px 18px; cursor: pointer; border: none; border-radius: 4px; font-size: 1em; }
+        #startButton { background-color: #28a745; color: white; }
+        #startButton:disabled { background-color: #9fd8ac; }
+        #stopButton { background-color: #dc3545; color: white; }
+        #stopButton:disabled { background-color: #f1a1ab; }
+        #status { margin-top: 15px; padding: 10px; border-radius: 4px; font-weight: bold; min-height: 1.2em; background-color: #e9ecef; border: 1px solid #ced4da; text-align: center; }
+        .error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
+        .success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+        .info { color: #0c5460; background-color: #d1ecf1; border-color: #bee5eb; }
+        #debug { margin-top: 10px; font-size: 0.8em; color: #666; }
     </style>
 </head>
 <body>
     <div id="container">
-        <h1>Your Bunq Mate</h1>
+        <h1>Audio Stream + Screen Snapshots (Single Script)</h1>
 
         <button id="startButton">Start Streaming</button>
         <button id="stopButton" disabled>Stop Streaming</button>
 
         <div id="status" class="info">Status: Idle</div>
-        <video id="preview" autoplay muted playsinline title="Live Preview (muted)"></video>
+        <video id="screenVideo" style="display:none;" muted playsinline></video>
+        <canvas id="snapshotCanvas" style="display:none;"></canvas>
+        <div id="debug"></div>
     </div>
 
     <script>
+        // --- Configuration ---
         const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
-        const TIMESLICE_MS = 1000;
+        const AUDIO_SAMPLE_RATE = 16000; // Target sample rate
+        const SNAPSHOT_INTERVAL_MS = 5000; // Send screenshot every 5 seconds
+        const JPEG_QUALITY = 0.7;
+        // Buffer size for ScriptProcessorNode (power of 2, e.g., 4096)
+        // Smaller values reduce latency but increase main thread load.
+        const AUDIO_BUFFER_SIZE = 4096;
 
+        // --- DOM Elements ---
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
-        const previewVideo = document.getElementById('preview');
+        const screenVideoElement = document.getElementById('screenVideo');
+        const canvasElement = document.getElementById('snapshotCanvas');
         const statusDiv = document.getElementById('status');
+        const debugDiv = document.getElementById('debug');
+        const canvasCtx = canvasElement.getContext('2d');
 
-        let mediaRecorder;
+        // --- State Variables ---
+        let audioStream;
         let screenStream;
+        let audioContext;
+        let scriptProcessorNode; // Using legacy ScriptProcessorNode
         let webSocket;
+        let snapshotIntervalId;
+        let audioSourceNode; // To disconnect later
 
+        // --- Helper Function to Update Status ---
         function updateStatus(message, type = 'info') {
             statusDiv.textContent = `Status: ${message}`;
-            statusDiv.className = type; // 'info', 'success', 'error'
+            statusDiv.className = type;
             console.log(`Status Update (${type}): ${message}`);
+        }
+        function logDebug(message) {
+             debugDiv.textContent = message;
+             console.log("Debug:", message);
         }
 
         // --- Core Streaming Logic ---
-
         async function startStreaming() {
             console.log("Attempting to start streaming...");
-            if (webSocket?.readyState === WebSocket.OPEN) {
-                console.warn("WebSocket is already open.");
-                return;
-            }
-            if (mediaRecorder?.state === 'recording') {
-                console.warn("MediaRecorder is already recording.");
+            if (webSocket?.readyState === WebSocket.OPEN || audioContext?.state === 'running') {
+                console.warn("Already streaming or connecting.");
                 return;
             }
 
-            // Reset UI for new attempt
             startButton.disabled = true;
-            stopButton.disabled = true; // Disable stop until WS opens successfully
-            updateStatus('Requesting screen access...', 'info');
+            stopButton.disabled = false;
+            updateStatus('Requesting microphone and screen access...', 'info');
+            logDebug("Requesting permissions...");
 
             try {
-                // 1. Get Screen Stream
-                // Common settings: frameRate for efficiency. Audio optional.
-                screenStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: { mediaSource: "screen", frameRate: 15 },
-                    // audio: true // Enable this if your server handles audio & you need it
+                // 1. Get Audio Stream (Microphone)
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: AUDIO_SAMPLE_RATE, // Request rate, browser might ignore
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                    },
+                    video: false
                 });
+                logDebug("Microphone access granted.");
 
-                previewVideo.srcObject = screenStream;
-                updateStatus('Screen access granted. Connecting WebSocket...', 'info');
+                // 2. Get Screen Stream (Video track only for snapshots)
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { mediaSource: "screen", frameRate: 5 },
+                    audio: false
+                });
+                logDebug("Screen access granted.");
 
-                // Handle user stopping sharing via browser UI (important!)
-                screenStream.getVideoTracks()[0].onended = () => {
-                   console.log("Screen sharing stopped by user via browser UI.");
-                   updateStatus('Screen sharing stopped by user.', 'info');
-                   stopStreaming(); // Clean up everything
-                };
+                screenVideoElement.srcObject = screenStream;
+                await screenVideoElement.play();
+                logDebug("Screen video attached.");
 
-                // 2. Establish WebSocket Connection
+                 screenStream.getVideoTracks()[0].onended = () => {
+                    console.log("Screen sharing stopped by user.");
+                    updateStatus('Screen sharing stopped.', 'info');
+                    stopStreaming();
+                 };
+
+                // 3. Setup WebSocket
                 webSocket = new WebSocket(FASTAPI_WS_URL);
 
                 webSocket.onopen = (event) => {
                     console.log('WebSocket connection opened.');
-                    updateStatus('WebSocket connected. Starting recorder...', 'info');
+                    updateStatus('WebSocket connected. Starting audio processing...', 'info');
+                    stopButton.disabled = false;
 
-                    // 3. Create and start MediaRecorder AFTER WebSocket is open
-                    if (!setupMediaRecorder()) {
-                        // setupMediaRecorder failed, cleanup
-                        updateStatus('Failed to setup MediaRecorder.', 'error');
-                        stopStreaming();
-                        return;
-                    }
+                    // 4. Setup Web Audio API using ScriptProcessorNode
+                    setupAudioProcessing_ScriptProcessor(); // Call the simplified function
 
-                    mediaRecorder.start(TIMESLICE_MS); // Start recording in chunks
-                    console.log(`MediaRecorder started with timeslice ${TIMESLICE_MS}ms.`);
-                    updateStatus('Streaming...', 'success');
-                    stopButton.disabled = false; // *** Enable Stop button only now ***
+                    // 5. Start periodic screen snapshots
+                    startSnapshots();
+
+                    updateStatus('Streaming audio + screen snapshots...', 'success');
                 };
-
-                webSocket.onmessage = (event) => {
-                    // Optional: Handle messages back from server
-                    console.log('Message from server:', event.data);
-                };
-
+                webSocket.onmessage = (event) => { console.log('Message from server:', event.data); };
                 webSocket.onerror = (event) => {
                     console.error('WebSocket error:', event);
-                    updateStatus('WebSocket connection error. Check console/server.', 'error');
-                    stopStreaming(); // Attempt cleanup
+                    updateStatus('WebSocket connection error.', 'error');
+                    stopStreaming();
                 };
-
                 webSocket.onclose = (event) => {
                     console.log(`WebSocket connection closed: Code=${event.code}, Reason='${event.reason}'`);
-                    // Only update status if not already idle from explicit stop
                     if (statusDiv.textContent !== 'Status: Idle') {
                         updateStatus('Streaming stopped (Connection closed).', 'info');
                     }
-                    // Ensure cleanup if closed unexpectedly while recording
-                    if (mediaRecorder?.state === "recording") {
-                        stopStreaming();
-                    } else {
-                         // Ensure buttons are reset if closed externally without recording running
-                        startButton.disabled = false;
-                        stopButton.disabled = true;
-                    }
+                    stopStreaming();
                 };
 
             } catch (err) {
                 console.error("Error during streaming setup:", err);
-                let errorMsg = `Error: ${err.name || 'Unknown Error'} - ${err.message || 'Failed to get stream or connect'}.`;
-                if (err.name === "NotAllowedError") {
-                    errorMsg = "Error: Screen sharing permission denied by user.";
-                } else if (err.name === "NotFoundError") {
-                     errorMsg = "Error: No screen selected or available.";
-                }
+                let errorMsg = `Error: ${err.name || 'Unknown Error'} - ${err.message || 'Failed to get stream/connect'}.`;
+                if (err.name === "NotAllowedError") { errorMsg = "Error: Mic/Screen permission denied."; }
+                else if (err.name === "NotFoundError") { errorMsg = "Error: Mic/Screen not found."; }
                 updateStatus(errorMsg, 'error');
-                stopStreaming(); // Clean up fully on setup errors
+                stopStreaming();
             }
         }
 
-        function setupMediaRecorder() {
-            if (!screenStream) {
-                console.error("Cannot setup MediaRecorder: No screen stream available.");
-                return false;
+        // --- Audio Processing using ScriptProcessorNode ---
+        function setupAudioProcessing_ScriptProcessor() {
+            if (!audioStream || !webSocket || webSocket.readyState !== WebSocket.OPEN) {
+                 console.error("Cannot setup audio: stream or websocket not ready.");
+                 updateStatus('Error setting up audio processing.', 'error');
+                 return;
             }
-            // Try specific codecs first, good for WebRTC/streaming
-            const mimeTypes = [
-                'video/webm; codecs=vp8',
-                'video/webm; codecs=vp9',
-                'video/webm', // Fallback webm
-                // 'video/mp4' // MP4 generally less suited for live streaming chunks
-            ];
-            let selectedMimeType = "";
-             for (const mimeType of mimeTypes) {
-                 if (MediaRecorder.isTypeSupported(mimeType)) {
-                     selectedMimeType = mimeType;
-                     break;
-                 }
-             }
-
-             if (!selectedMimeType) {
-                 console.error("Fatal: No suitable mimeType found for MediaRecorder.");
-                 updateStatus('Browser cannot record in a suitable format (WebM preferred).', 'error');
-                 return false;
-             }
-
-            console.log(`Attempting to use MediaRecorder mimeType: ${selectedMimeType}`);
             try {
-                mediaRecorder = new MediaRecorder(screenStream, { mimeType: selectedMimeType });
-            } catch (e) {
-                console.error(`Fatal: Could not create MediaRecorder with ${selectedMimeType}:`, e);
-                updateStatus(`Error creating MediaRecorder: ${e.message}`, 'error');
-                return false;
-            }
+                // Use unprefixed AudioContext if available
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                audioContext = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE });
 
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0 && webSocket?.readyState === WebSocket.OPEN) {
-                    // console.debug(`Sending chunk size: ${event.data.size}`); // Very verbose
-                    webSocket.send(event.data);
-                } else if (event.data.size > 0){
-                   console.warn("WebSocket not open when data available. Chunk not sent.");
+                // Log the actual sample rate - browser might ignore request and use default
+                logDebug(`Using ScriptProcessorNode. Actual AudioContext Sample Rate: ${audioContext.sampleRate}Hz (Requested: ${AUDIO_SAMPLE_RATE}Hz). WARNING: Deprecated & may cause glitches.`);
+                if (audioContext.sampleRate !== AUDIO_SAMPLE_RATE) {
+                     console.warn("Actual sample rate differs from target. Server might need resampling or quality may be affected.");
                 }
-            };
 
-            mediaRecorder.onstop = () => {
-                console.log('MediaRecorder stopped.');
-            };
+                audioSourceNode = audioContext.createMediaStreamSource(audioStream);
 
-            mediaRecorder.onerror = (event) => {
-               console.error('MediaRecorder error:', event.error);
-               updateStatus(`MediaRecorder error: ${event.error.name}`, 'error');
-               stopStreaming(); // Stop everything on recorder error
-            };
+                scriptProcessorNode = audioContext.createScriptProcessor(AUDIO_BUFFER_SIZE, 1, 1); // bufferSize, inputChannels, outputChannels
 
-            console.log(`Successfully created MediaRecorder with mimeType: ${mediaRecorder.mimeType}`);
-            return true; // Success
+                scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
+                    const inputBuffer = audioProcessingEvent.inputBuffer;
+                    const inputData = inputBuffer.getChannelData(0); // Float32 data
+
+                    // Convert Float32 [-1.0, 1.0] to Int16 [-32768, 32767]
+                    const outputInt16 = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        const s = Math.max(-1, Math.min(1, inputData[i]));
+                        outputInt16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    }
+
+                    if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+                        // Send the raw bytes (ArrayBuffer) of the Int16Array
+                        webSocket.send(outputInt16.buffer);
+                        // logDebug(`Sent ${outputInt16.byteLength} audio bytes`);
+                    }
+                };
+
+                // Connect the nodes: Source -> Processor -> Destination
+                // Destination connection is required for ScriptProcessorNode to activate
+                audioSourceNode.connect(scriptProcessorNode);
+                scriptProcessorNode.connect(audioContext.destination);
+
+            } catch (err) {
+                 console.error("Error setting up ScriptProcessorNode:", err);
+                 updateStatus(`Audio setup error: ${err.message}`, 'error');
+                 stopStreaming();
+            }
         }
 
+        // --- Snapshot Logic (remains the same) ---
+        function startSnapshots() {
+            if (snapshotIntervalId) clearInterval(snapshotIntervalId);
+            logDebug(`Starting snapshots every ${SNAPSHOT_INTERVAL_MS}ms.`);
+
+            snapshotIntervalId = setInterval(async () => {
+                 if (!screenStream?.active || !webSocket || webSocket.readyState !== WebSocket.OPEN) {
+                     return;
+                 }
+                 try {
+                     canvasElement.width = screenVideoElement.videoWidth;
+                     canvasElement.height = screenVideoElement.videoHeight;
+                     if (canvasElement.width === 0 || canvasElement.height === 0) return;
+
+                     canvasCtx.drawImage(screenVideoElement, 0, 0, canvasElement.width, canvasElement.height);
+                     const jpegBase64 = canvasElement.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
+
+                     if (jpegBase64 && webSocket && webSocket.readyState === WebSocket.OPEN) {
+                         const imageMessage = JSON.stringify({
+                             type: "image", mime_type: "image/jpeg", data: jpegBase64
+                         });
+                         webSocket.send(imageMessage);
+                         logDebug(`Sent snapshot (${Math.round(jpegBase64.length * 3/4 / 1024)} kB)`);
+                     }
+                 } catch (err) {
+                      console.error("Error taking/sending snapshot:", err);
+                      logDebug(`Snapshot error: ${err.message}`);
+                 }
+            }, SNAPSHOT_INTERVAL_MS);
+        }
+
+        // --- Stop Logic (Updated to disconnect ScriptProcessorNode) ---
         function stopStreaming() {
-            console.log("Stopping stream initiated...");
+            console.log("Stopping stream...");
+            clearInterval(snapshotIntervalId);
+            snapshotIntervalId = null;
 
-            // 1. Stop MediaRecorder
-            if (mediaRecorder?.state === 'recording') {
-                try {
-                    mediaRecorder.stop();
-                } catch (e) {
-                    console.error("Error stopping MediaRecorder:", e);
-                }
+            // Disconnect ScriptProcessorNode first
+            if (scriptProcessorNode) {
+                scriptProcessorNode.disconnect(); // Disconnects from destination
+                scriptProcessorNode.onaudioprocess = null; // Remove callback
+                scriptProcessorNode = null;
             }
-            mediaRecorder = null; // Clear reference
+            if (audioSourceNode) {
+                 audioSourceNode.disconnect(); // Disconnect source from processor
+                 audioSourceNode = null;
+            }
+            // Close AudioContext last
+            if (audioContext?.state === 'running') {
+                 audioContext.close().catch(e => console.error("Error closing AudioContext:", e));
+                 audioContext = null;
+            }
 
-            // 2. Close WebSocket
             if (webSocket?.readyState === WebSocket.OPEN) {
-                webSocket.close(1000, "Client stopped streaming normally"); // 1000: Normal Closure
-            } else if (webSocket?.readyState === WebSocket.CONNECTING) {
-                 console.log("Aborting WebSocket connection attempt.");
-                 webSocket.close(1000, "Client aborted connection attempt");
+                webSocket.close(1000, "Client stopped streaming normally");
             }
-            webSocket = null; // Clear reference
+            webSocket = null;
 
-            // 3. Stop screen capture tracks
-            if (screenStream) {
-                screenStream.getTracks().forEach(track => track.stop());
-                screenStream = null;
-                previewVideo.srcObject = null; // Clear preview
-            }
+            audioStream?.getTracks().forEach(track => track.stop());
+            screenStream?.getTracks().forEach(track => track.stop());
+            audioStream = null;
+            screenStream = null;
+            screenVideoElement.srcObject = null;
 
-            // 4. Update UI
             updateStatus('Idle', 'info');
             startButton.disabled = false;
             stopButton.disabled = true;
+            logDebug("Stopped.");
             console.log("Streaming stopped and resources released.");
         }
 
@@ -306,28 +285,23 @@
 
         // --- Initial Check for Browser Support ---
         window.addEventListener('load', () => {
-            let supported = true;
-            let errorMsg = "";
-            if (!navigator.mediaDevices?.getDisplayMedia) {
-                errorMsg = 'getDisplayMedia API not supported.';
-                supported = false;
-            } else if (!window.MediaRecorder) {
-                 errorMsg = 'MediaRecorder API not supported.';
-                 supported = false;
-            } else if (!window.WebSocket) {
-                 errorMsg = 'WebSocket API not supported.';
-                 supported = false;
-            }
+             let supported = true;
+             let errorMsg = "";
+             // Update check for AudioContext/webkitAudioContext
+             const AudioContextCheck = window.AudioContext || window.webkitAudioContext;
+             if (!navigator.mediaDevices?.getUserMedia) { errorMsg = 'getUserMedia (mic) not supported.'; supported = false; }
+             else if (!navigator.mediaDevices?.getDisplayMedia) { errorMsg = 'getDisplayMedia (screen) not supported.'; supported = false; }
+             else if (!AudioContextCheck) { errorMsg = 'Web Audio API not supported.'; supported = false; }
+             else if (!window.WebSocket) { errorMsg = 'WebSocket API not supported.'; supported = false; }
+             // Check canvas support
+             const elem = document.createElement('canvas');
+             if (!elem.getContext || !elem.getContext('2d')) { errorMsg = 'Canvas API not supported.'; supported = false; }
 
-            if (!supported) {
-                 updateStatus(`Error: ${errorMsg} Streaming not possible.`, 'error');
-                 startButton.disabled = true;
-                 stopButton.disabled = true;
-            } else {
-                 console.log("Browser supports necessary APIs.");
-            }
+             if (!supported) { updateStatus(`Error: ${errorMsg}`, 'error'); startButton.disabled = true; stopButton.disabled = true; }
+             else { console.log("Browser supports necessary APIs."); }
         });
 
     </script>
+
 </body>
 </html>
