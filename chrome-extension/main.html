@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Streamer</title>
+    <meta charset="UTF-8">
+    <style>
+        /* (Keep the same CSS as before) */
+        body { font-family: sans-serif; width: 350px; padding: 15px; line-height: 1.5; background-color: #f4f4f4; }
+        #container { background-color: #fff; padding: 10px; border-radius: 8px; /* Removed shadow/width */ }
+        h1 { font-size: 1.2em; text-align: center; color: #333; margin-bottom: 10px;}
+        video { display: none; } /* Keep hidden */
+        canvas { display: none; } /* Keep hidden */
+        button { margin: 5px 2px; padding: 8px 12px; cursor: pointer; border: none; border-radius: 4px; font-size: 0.9em; }
+        #startButton { background-color: #28a745; color: white; width: 48%; }
+        #startButton:disabled { background-color: #9fd8ac; cursor: not-allowed; }
+        #stopButton { background-color: #dc3545; color: white; width: 48%; }
+        #stopButton:disabled { background-color: #f1a1ab; cursor: not-allowed; }
+        #status { margin-top: 10px; padding: 8px; border-radius: 4px; font-weight: bold; min-height: 1.1em; background-color: #e9ecef; border: 1px solid #ced4da; text-align: center; font-size: 0.9em; }
+        .error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
+        .success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+        .info { color: #0c5460; background-color: #d1ecf1; border-color: #bee5eb; }
+        .playing { color: #856404; background-color: #fff3cd; border-color: #ffeeba; }
+        #debug { margin-top: 8px; font-size: 0.8em; color: #666; height: 2.5em; overflow-y: auto; border: 1px solid #eee; padding: 3px; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Audio Stream + Snapshots</h1>
+
+        <button id="startButton">Start Session</button>
+        <button id="stopButton" disabled>Stop Session</button>
+
+        <div id="status" class="info">Status: Idle</div>
+        <div id="debug"></div></div>
+
+    <video id="screenVideo" style="display:none;" muted playsinline></video>
+    <canvas id="snapshotCanvas" style="display:none;"></canvas>
+
+    <script src="main.js"></script>
+</body>
+</html>
