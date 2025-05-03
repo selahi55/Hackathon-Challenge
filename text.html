@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple Screen Stream Test</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 1em;
+            line-height: 1.5;
+            background-color: #f4f4f4;
+        }
+        #container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 600px;
+            margin: 20px auto;
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        video {
+            border: 1px solid #ccc;
+            max-width: 100%; /* Responsive */
+            height: auto;
+            margin-top: 15px;
+            background-color: #eee;
+            display: block; /* Prevents extra space below */
+        }
+        button {
+            margin: 10px 5px 10px 0;
+            padding: 10px 18px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            font-size: 1em;
+        }
+        #startButton {
+            background-color: #28a745;
+            color: white;
+        }
+        #startButton:disabled {
+            background-color: #9fd8ac;
+        }
+        #stopButton {
+            background-color: #dc3545;
+            color: white;
+        }
+         #stopButton:disabled {
+            background-color: #f1a1ab;
+        }
+        #status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            min-height: 1.2em;
+            background-color: #e9ecef;
+            border: 1px solid #ced4da;
+            text-align: center;
+        }
+        .error {
+             color: #721c24;
+             background-color: #f8d7da;
+             border-color: #f5c6cb;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+        }
+         .info {
+            color: #0c5460;
+            background-color: #d1ecf1;
+            border-color: #bee5eb;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Simple Screen Stream Test</h1>
+
+        <button id="startButton">Start Streaming</button>
+        <button id="stopButton" disabled>Stop Streaming</button>
+
+        <div id="status" class="info">Status: Idle</div>
+        <video id="preview" autoplay muted playsinline title="Live Preview (muted)"></video>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        // IMPORTANT: Adjust this URL to where your FastAPI WebSocket is running!
+        const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
+        const TIMESLICE_MS = 1000; // Send data chunks every 1 second
+
+        // --- DOM Elements ---
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const previewVideo = document.getElementById('preview');
+        const statusDiv = document.getElementById('status');
+
+        // --- State Variables ---
+        let mediaRecorder;
+        let screenStream;
+        let webSocket;
+
+        // --- Helper Function to Update Status ---
+        function updateStatus(message, type = 'info') {
+            statusDiv.textContent = `Status: ${message}`;
+            statusDiv.className = type; // 'info', 'success', 'error'
+            console.log(`Status Update (${type}): ${message}`);
+        }
+
+        // --- Core Streaming Logic ---
+
+        async function startStreaming() {
+            console.log("Attempting to start streaming...");
+            if (webSocket?.readyState === WebSocket.OPEN) {
+                console.warn("WebSocket is already open.");
+                return;
+            }
+            if (mediaRecorder?.state === 'recording') {
+                console.warn("MediaRecorder is already recording.");
+                return;
+            }
+
+            // Reset UI for new attempt
+            startButton.disabled = true;
+            stopButton.disabled = true; // Disable stop until WS opens successfully
+            updateStatus('Requesting screen access...', 'info');
+
+            try {
+                // 1. Get Screen Stream
+                // Common settings: frameRate for efficiency. Audio optional.
+                screenStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { mediaSource: "screen", frameRate: 15 },
+                    // audio: true // Enable this if your server handles audio & you need it
+                });
+
+                previewVideo.srcObject = screenStream;
+                updateStatus('Screen access granted. Connecting WebSocket...', 'info');
+
+                // Handle user stopping sharing via browser UI (important!)
+                screenStream.getVideoTracks()[0].onended = () => {
+                   console.log("Screen sharing stopped by user via browser UI.");
+                   updateStatus('Screen sharing stopped by user.', 'info');
+                   stopStreaming(); // Clean up everything
+                };
+
+                // 2. Establish WebSocket Connection
+                webSocket = new WebSocket(FASTAPI_WS_URL);
+
+                webSocket.onopen = (event) => {
+                    console.log('WebSocket connection opened.');
+                    updateStatus('WebSocket connected. Starting recorder...', 'info');
+
+                    // 3. Create and start MediaRecorder AFTER WebSocket is open
+                    if (!setupMediaRecorder()) {
+                        // setupMediaRecorder failed, cleanup
+                        updateStatus('Failed to setup MediaRecorder.', 'error');
+                        stopStreaming();
+                        return;
+                    }
+
+                    mediaRecorder.start(TIMESLICE_MS); // Start recording in chunks
+                    console.log(`MediaRecorder started with timeslice ${TIMESLICE_MS}ms.`);
+                    updateStatus('Streaming...', 'success');
+                    stopButton.disabled = false; // *** Enable Stop button only now ***
+                };
+
+                webSocket.onmessage = (event) => {
+                    // Optional: Handle messages back from server
+                    console.log('Message from server:', event.data);
+                };
+
+                webSocket.onerror = (event) => {
+                    console.error('WebSocket error:', event);
+                    updateStatus('WebSocket connection error. Check console/server.', 'error');
+                    stopStreaming(); // Attempt cleanup
+                };
+
+                webSocket.onclose = (event) => {
+                    console.log(`WebSocket connection closed: Code=${event.code}, Reason='${event.reason}'`);
+                    // Only update status if not already idle from explicit stop
+                    if (statusDiv.textContent !== 'Status: Idle') {
+                        updateStatus('Streaming stopped (Connection closed).', 'info');
+                    }
+                    // Ensure cleanup if closed unexpectedly while recording
+                    if (mediaRecorder?.state === "recording") {
+                        stopStreaming();
+                    } else {
+                         // Ensure buttons are reset if closed externally without recording running
+                        startButton.disabled = false;
+                        stopButton.disabled = true;
+                    }
+                };
+
+            } catch (err) {
+                console.error("Error during streaming setup:", err);
+                let errorMsg = `Error: ${err.name || 'Unknown Error'} - ${err.message || 'Failed to get stream or connect'}.`;
+                if (err.name === "NotAllowedError") {
+                    errorMsg = "Error: Screen sharing permission denied by user.";
+                } else if (err.name === "NotFoundError") {
+                     errorMsg = "Error: No screen selected or available.";
+                }
+                updateStatus(errorMsg, 'error');
+                stopStreaming(); // Clean up fully on setup errors
+            }
+        }
+
+        function setupMediaRecorder() {
+            if (!screenStream) {
+                console.error("Cannot setup MediaRecorder: No screen stream available.");
+                return false;
+            }
+            // Try specific codecs first, good for WebRTC/streaming
+            const mimeTypes = [
+                'video/webm; codecs=vp8',
+                'video/webm; codecs=vp9',
+                'video/webm', // Fallback webm
+                // 'video/mp4' // MP4 generally less suited for live streaming chunks
+            ];
+            let selectedMimeType = "";
+             for (const mimeType of mimeTypes) {
+                 if (MediaRecorder.isTypeSupported(mimeType)) {
+                     selectedMimeType = mimeType;
+                     break;
+                 }
+             }
+
+             if (!selectedMimeType) {
+                 console.error("Fatal: No suitable mimeType found for MediaRecorder.");
+                 updateStatus('Browser cannot record in a suitable format (WebM preferred).', 'error');
+                 return false;
+             }
+
+            console.log(`Attempting to use MediaRecorder mimeType: ${selectedMimeType}`);
+            try {
+                mediaRecorder = new MediaRecorder(screenStream, { mimeType: selectedMimeType });
+            } catch (e) {
+                console.error(`Fatal: Could not create MediaRecorder with ${selectedMimeType}:`, e);
+                updateStatus(`Error creating MediaRecorder: ${e.message}`, 'error');
+                return false;
+            }
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0 && webSocket?.readyState === WebSocket.OPEN) {
+                    // console.debug(`Sending chunk size: ${event.data.size}`); // Very verbose
+                    webSocket.send(event.data);
+                } else if (event.data.size > 0){
+                   console.warn("WebSocket not open when data available. Chunk not sent.");
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                console.log('MediaRecorder stopped.');
+            };
+
+            mediaRecorder.onerror = (event) => {
+               console.error('MediaRecorder error:', event.error);
+               updateStatus(`MediaRecorder error: ${event.error.name}`, 'error');
+               stopStreaming(); // Stop everything on recorder error
+            };
+
+            console.log(`Successfully created MediaRecorder with mimeType: ${mediaRecorder.mimeType}`);
+            return true; // Success
+        }
+
+        function stopStreaming() {
+            console.log("Stopping stream initiated...");
+
+            // 1. Stop MediaRecorder
+            if (mediaRecorder?.state === 'recording') {
+                try {
+                    mediaRecorder.stop();
+                } catch (e) {
+                    console.error("Error stopping MediaRecorder:", e);
+                }
+            }
+            mediaRecorder = null; // Clear reference
+
+            // 2. Close WebSocket
+            if (webSocket?.readyState === WebSocket.OPEN) {
+                webSocket.close(1000, "Client stopped streaming normally"); // 1000: Normal Closure
+            } else if (webSocket?.readyState === WebSocket.CONNECTING) {
+                 console.log("Aborting WebSocket connection attempt.");
+                 webSocket.close(1000, "Client aborted connection attempt");
+            }
+            webSocket = null; // Clear reference
+
+            // 3. Stop screen capture tracks
+            if (screenStream) {
+                screenStream.getTracks().forEach(track => track.stop());
+                screenStream = null;
+                previewVideo.srcObject = null; // Clear preview
+            }
+
+            // 4. Update UI
+            updateStatus('Idle', 'info');
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            console.log("Streaming stopped and resources released.");
+        }
+
+        // --- Event Listeners ---
+        startButton.addEventListener('click', startStreaming);
+        stopButton.addEventListener('click', stopStreaming);
+
+        // --- Initial Check for Browser Support ---
+        window.addEventListener('load', () => {
+            let supported = true;
+            let errorMsg = "";
+            if (!navigator.mediaDevices?.getDisplayMedia) {
+                errorMsg = 'getDisplayMedia API not supported.';
+                supported = false;
+            } else if (!window.MediaRecorder) {
+                 errorMsg = 'MediaRecorder API not supported.';
+                 supported = false;
+            } else if (!window.WebSocket) {
+                 errorMsg = 'WebSocket API not supported.';
+                 supported = false;
+            }
+
+            if (!supported) {
+                 updateStatus(`Error: ${errorMsg} Streaming not possible.`, 'error');
+                 startButton.disabled = true;
+                 stopButton.disabled = true;
+            } else {
+                 console.log("Browser supports necessary APIs.");
+            }
+        });
+
+    </script>
+</body>
+</html>
