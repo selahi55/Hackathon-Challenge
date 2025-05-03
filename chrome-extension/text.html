@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Simple Screen Stream Test</title>
+    <title>Your Bunq Mate</title>
     <meta charset="UTF-8">
     <style>
         body {
@@ -24,11 +24,11 @@
         }
         video {
             border: 1px solid #ccc;
-            max-width: 100%; /* Responsive */
+            max-width: 100%;
             height: auto;
             margin-top: 15px;
             background-color: #eee;
-            display: block; /* Prevents extra space below */
+            display: block; 
         }
         button {
             margin: 10px 5px 10px 0;
@@ -81,7 +81,7 @@
 </head>
 <body>
     <div id="container">
-        <h1>Simple Screen Stream Test</h1>
+        <h1>Your Bunq Mate</h1>
 
         <button id="startButton">Start Streaming</button>
         <button id="stopButton" disabled>Stop Streaming</button>
@@ -91,23 +91,18 @@
     </div>
 
     <script>
-        // --- Configuration ---
-        // IMPORTANT: Adjust this URL to where your FastAPI WebSocket is running!
         const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
-        const TIMESLICE_MS = 1000; // Send data chunks every 1 second
+        const TIMESLICE_MS = 1000;
 
-        // --- DOM Elements ---
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
         const previewVideo = document.getElementById('preview');
         const statusDiv = document.getElementById('status');
 
-        // --- State Variables ---
         let mediaRecorder;
         let screenStream;
         let webSocket;
 
-        // --- Helper Function to Update Status ---
         function updateStatus(message, type = 'info') {
             statusDiv.textContent = `Status: ${message}`;
             statusDiv.className = type; // 'info', 'success', 'error'

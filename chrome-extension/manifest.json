@@ -1,38 +1,26 @@
 {
   "manifest_version": 3,
-  "name": "Screen Streamer",
+  "name": "Your Bunq Mate",
   "version": "1.0",
-  "description": "Records the screen and streams it to a WebSocket endpoint.",
-
-  "permissions": [
-    // Note: 'getDisplayMedia' permission is requested at runtime by the user action,
-    // it does not need to be listed here in Manifest V3.
-    // We DO need permissions if we were interacting with tabs, storage, etc.
-  ],
-
+  "description": "Your personal Bunq Mate to help you through everything!",
   "action": {
-    "default_popup": "index.html", // Your HTML file that contains the buttons/video
+    "default_popup": "text.html",
     "default_icon": {
-      "16": "images/icon16.png", // Path to an icon for the toolbar (small)
-      "48": "images/icon48.png", // Path to an icon for extensions page
-      "128": "images/icon128.png" // Path to an icon (larger)
-    }
-  },
-
-  "icons": {
       "16": "images/icon16.png",
       "48": "images/icon48.png",
       "128": "images/icon128.png"
+    }
   },
-
-  "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:8000;"
-    // Important:
-    // - script-src 'self': Allows loading scripts (like streamer.js) from the extension's own package.
-    // - object-src 'self': Disallows plugins like Flash. Standard security practice.
-    // - connect-src ws://127.0.0.1:8000: **Crucial!** Allows your extension's pages (like index.html's script)
-    //   to establish a WebSocket connection specifically to ws://127.0.0.1:8000.
-    //   Adjust this if your endpoint URL changes (e.g., use ws://localhost:* for local dev,
-    //   or wss://your-production-domain.com for production).
+  "permissions": [
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "ws://127.0.0.1:8000/*"
+  ],
+  "icons": {
+    "16": "images/icon16.png",
+    "48": "images/icon48.png",
+    "128": "images/icon128.png"
   }
 }
