@@ -280,10 +280,10 @@ def google_search(query, site_restriction=None):
                 return {
                     "metadata": "",
                     "error": f"something went wrong, please try again later",
-                    "all_results": search_data["items"][:5]
+                    "all_results": []
                 }
         else:
-            return {"error": "No URL found in search results"}
+            return {"error": "No data found in search results"}
 
     except requests.RequestException as e:
         print(f"Google Search API error: {e}")
