@@ -4,30 +4,118 @@
     <title>PTT Audio + Screen Snapshots (Worklet Fix 2)</title>
     <meta charset="UTF-8">
     <style>
-        /* (Keep CSS the same) */
-        body { font-family: sans-serif; padding: 1em; line-height: 1.5; background-color: #f4f4f4; }
-        #container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; margin: 20px auto; }
-        h1 { text-align: center; color: #333; }
-        video { border: 1px solid #ccc; max-width: 100%; height: auto; margin-top: 15px; background-color: #eee; display: block; }
-        button { margin: 10px 5px 10px 0; padding: 10px 18px; cursor: pointer; border: none; border-radius: 4px; font-size: 1em; transition: background-color 0.2s ease; }
-        #startButton { background-color: #28a745; color: white; }
-        #startButton:disabled { background-color: #9fd8ac; cursor: not-allowed; }
-        #stopButton { background-color: #dc3545; color: white; }
-        #stopButton:disabled { background-color: #f1a1ab; cursor: not-allowed; }
-        #status { margin-top: 15px; padding: 10px; border-radius: 4px; font-weight: bold; min-height: 1.2em; background-color: #e9ecef; border: 1px solid #ced4da; text-align: center; }
-        .error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
-        .success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
-        .info { color: #0c5460; background-color: #d1ecf1; border-color: #bee5eb; }
-        .playing { color: #856404; background-color: #fff3cd; border-color: #ffeeba; }
-        #debug { margin-top: 10px; font-size: 0.8em; color: #666; }
+        body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        padding: 0;
+        margin: 0;
+        line-height: 1.5;
+        background-color: #000000;
+        min-width: 400px;
+        min-height: 500px;
+        color: #ffffff;
+        height: 100vh; /* Add this to fill viewport height */
+        overflow: hidden; /* Prevent scrolling */
+    }
+        #container {
+            background-color: #222222;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin: 0;
+            height: calc(100%); /* Subtract padding (16px top + 16px bottom) */
+            box-sizing: border-box; /* Include padding in height calculation */
+        }
+        h1 {
+            text-align: center;
+            color: #ffffff; /* Changed to white */
+            margin-top: 0;
+            padding-top: 10px;
+            font-size: 20px;
+        }
+        video {
+        border: 1px solid #444444;
+        width: 100%;
+        height: auto;
+        max-height: 300px; /* Increased from 250px to 300px */
+        margin-top: 15px;
+        background-color: #111111;
+        display: block;
+        object-fit: contain; /* Ensures video maintains aspect ratio */
+        }
+        .button-container {
+            display: flex;
+            justify-content: space-between;
+            margin: 15px 0;
+        }
+        button {
+            flex-grow: 1;
+            margin: 0 5px;
+            padding: 10px 18px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            font-size: 1em;
+            font-weight: bold;
+        }
+        button:first-child {
+            margin-left: 0;
+        }
+        button:last-child {
+            margin-right: 0;
+        }
+        #startButton {
+            background-color: #28a745;
+            color: white;
+        }
+        #startButton:disabled {
+            background-color: #9fd8ac;
+            cursor: not-allowed;
+        }
+        #stopButton {
+            background-color: #dc3545;
+            color: white;
+        }
+        #stopButton:disabled {
+            background-color: #f1a1ab;
+            cursor: not-allowed;
+        }
+        #status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            min-height: 1.2em;
+            background-color: #333333; /* Darker background */
+            border: 1px solid #444444; /* Darker border */
+            text-align: center;
+            color: #ffffff; /* White text */
+        }
+        .error {
+            color: #ff6b6b; /* Brighter red for dark mode */
+            background-color: #3a1a1a; /* Dark red background */
+            border-color: #5c2c2c;
+        }
+        .success {
+            color: #6bff6b; /* Brighter green for dark mode */
+            background-color: #1a3a1a; /* Dark green background */
+            border-color: #2c5c2c;
+        }
+        .info {
+            color: #6bc4ff; /* Brighter blue for dark mode */
+            background-color: #1a2a3a; /* Dark blue background */
+            border-color: #2c3c5c;
+        }
     </style>
 </head>
 <body>
     <div id="container">
         <h1>Continuous Audio + Snapshots (Client Playback Fix)</h1>
 
-        <button id="startButton">Start Session</button>
-        <button id="stopButton" disabled>Stop Session</button>
+        <div class="button-container">
+            <button id="startButton">Start Asking</button>
+            <button id="stopButton" disabled>Stop Asking</button>
+        </div>
+
         <div id="status" class="info">Status: Idle</div>
         <video id="screenVideo" style="display:none;" muted playsinline></video>
         <canvas id="snapshotCanvas" style="display:none;"></canvas>
@@ -36,10 +124,11 @@
 
      <script>
         // --- Configuration ---
+        window.resizeBy(600, 450)
         const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
         const AUDIO_INPUT_SAMPLE_RATE = 16000; // Rate we capture and send
         const AUDIO_PLAYBACK_SAMPLE_RATE = 24000; // Rate we EXPECT from Gemini/Server (adjust if needed)
-        const SNAPSHOT_INTERVAL_MS = 8000;
+        const SNAPSHOT_INTERVAL_MS = 1000;
         const JPEG_QUALITY = 0.6;
         const SNAPSHOT_MAX_WIDTH = 1024;
 
