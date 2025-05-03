@@ -200,12 +200,38 @@ def get_bunq_how_to_steps(query):
     Searches for Bunq how-to steps on together.bunq.com using Google Search API
     and retrieves the content from the first result.
     """
-    search_result = google_search(query, "together.bunq.com")
-    
-    if "error" in search_result:
-        return {"results": f"Error: {search_result['error']}"}
-    
-    return {"results": search_result}
+    try:
+        # Call the Gemini API with the function declaration
+        response = client.aio.live.call(
+            model=LIVE_API_MODEL,
+            config=LIVE_CONFIG,
+            prompt=f"Search for Bunq how-to steps: {query}",
+            function_calling_config=types.FunctionCallingConfig(
+                mode=types.FunctionCallingMode.AUTO
+            )
+        )
+
+        # Check if the model suggests a function call
+        if response.function_call:
+            function_name = response.function_call.name
+            arguments = response.function_call.arguments
+
+            if function_name == "get_bunq_how_to_steps":
+                # Execute the function with the provided arguments
+                search_result = google_search(arguments['query'], "together.bunq.com")
+
+                if "error" in search_result:
+                    return {"results": f"Error: {search_result['error']}"}
+
+                # Return the results to the model
+                return {"results": search_result}
+
+        # If no function call, return the model's direct response
+        return {"results": response.text}
+
+    except Exception as e:
+        logger.error(f"Error in get_bunq_how_to_steps: {e}", exc_info=True)
+        return {"results": "An error occurred while processing your request."}
 
 
 # ==============================================================================
