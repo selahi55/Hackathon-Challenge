@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PTT Audio + Screen Snapshots (Worklet Fix 2)</title>
+    <meta charset="UTF-8">
+    <style>
+        /* (Keep CSS the same) */
+        body { font-family: sans-serif; padding: 1em; line-height: 1.5; background-color: #f4f4f4; }
+        #container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); max-width: 600px; margin: 20px auto; }
+        h1 { text-align: center; color: #333; }
+        video { border: 1px solid #ccc; max-width: 100%; height: auto; margin-top: 15px; background-color: #eee; display: block; }
+        button { margin: 10px 5px 10px 0; padding: 10px 18px; cursor: pointer; border: none; border-radius: 4px; font-size: 1em; transition: background-color 0.2s ease; }
+        #startButton { background-color: #28a745; color: white; }
+        #startButton:disabled { background-color: #9fd8ac; cursor: not-allowed; }
+        #stopButton { background-color: #dc3545; color: white; }
+        #stopButton:disabled { background-color: #f1a1ab; cursor: not-allowed; }
+        #status { margin-top: 15px; padding: 10px; border-radius: 4px; font-weight: bold; min-height: 1.2em; background-color: #e9ecef; border: 1px solid #ced4da; text-align: center; }
+        .error { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
+        .success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
+        .info { color: #0c5460; background-color: #d1ecf1; border-color: #bee5eb; }
+        .playing { color: #856404; background-color: #fff3cd; border-color: #ffeeba; }
+        #debug { margin-top: 10px; font-size: 0.8em; color: #666; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <h1>Continuous Audio + Snapshots (Client Playback Fix)</h1>
+
+        <button id="startButton">Start Session</button>
+        <button id="stopButton" disabled>Stop Session</button>
+        <div id="status" class="info">Status: Idle</div>
+        <video id="screenVideo" style="display:none;" muted playsinline></video>
+        <canvas id="snapshotCanvas" style="display:none;"></canvas>
+        <div id="debug"></div>
+    </div>
+
+     <script>
+        // --- Configuration ---
+        const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
+        const AUDIO_INPUT_SAMPLE_RATE = 16000; // Rate we capture and send
+        const AUDIO_PLAYBACK_SAMPLE_RATE = 24000; // Rate we EXPECT from Gemini/Server (adjust if needed)
+        const SNAPSHOT_INTERVAL_MS = 8000;
+        const JPEG_QUALITY = 0.6;
+        const SNAPSHOT_MAX_WIDTH = 1024;
+
+        // --- DOM Elements ---
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+        const screenVideoElement = document.getElementById('screenVideo');
+        const canvasElement = document.getElementById('snapshotCanvas');
+        const statusDiv = document.getElementById('status');
+        const debugDiv = document.getElementById('debug');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        // --- State Variables ---
+        let audioStream; let screenStream;
+        let captureAudioContext; let playbackAudioContext;
+        let audioProcessorNode; let webSocket; let snapshotIntervalId;
+        let audioSourceNode; let audioProcessorUrl;
+        let isPlaybackActive = false;
+        let playbackQueue = [];
+        let isPlaying = false;
+
+        // --- Helper Functions ---
+        function updateStatus(message, type = 'info') { statusDiv.textContent = `Status: ${message}`; statusDiv.className = type; console.log(`Status Update (${type}): ${message}`); }
+        function logDebug(message) { debugDiv.textContent = message; console.log("Debug:", message); }
+
+        // --- Core Session Logic ---
+        async function startSession() {
+            console.log("Attempting start...");
+            // Prevent multiple starts
+            if (webSocket?.readyState === WebSocket.OPEN || (captureAudioContext && captureAudioContext.state !== 'closed') || (playbackAudioContext && playbackAudioContext.state !== 'closed') ) {
+                console.warn("Session already active or starting.");
+                return;
+            }
+            startButton.disabled = true; stopButton.disabled = false;
+            updateStatus('Requesting permissions...', 'info'); logDebug("Requesting permissions...");
+            try {
+                // Init Playback Context
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                playbackAudioContext = new AudioContext({ sampleRate: AUDIO_PLAYBACK_SAMPLE_RATE });
+                logDebug(`Playback AC ready (Rate: ${playbackAudioContext.sampleRate}Hz)`);
+
+                // Get Media Streams
+                audioStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: AUDIO_INPUT_SAMPLE_RATE, channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false });
+                logDebug("Mic OK.");
+                screenStream = await navigator.mediaDevices.getDisplayMedia({ video: { mediaSource: "screen", frameRate: 5 }, audio: false });
+                logDebug("Screen OK.");
+                screenVideoElement.srcObject = screenStream; await screenVideoElement.play();
+                screenStream.getVideoTracks()[0].onended = () => { logDebug("Screen stopped."); stopSession(); };
+
+                // Connect WebSocket
+                webSocket = new WebSocket(FASTAPI_WS_URL);
+                webSocket.binaryType = "arraybuffer";
+
+                webSocket.onopen = async (event) => {
+                    console.log('WS open.'); updateStatus('Session active. Listening...', 'success'); stopButton.disabled = false;
+                    // Setup and start audio capture *after* WS is open
+                    if (!await setupAudioCapture_Worklet()) {
+                         // Handle setup failure (error already logged in helper)
+                         stopSession();
+                         return;
+                    }
+                    startSnapshots();
+                };
+
+                webSocket.onmessage = (event) => { /* (Same logic as before to handle incoming audio/text) */ if (event.data instanceof ArrayBuffer) { const audioChunk = event.data; playbackQueue.push(audioChunk); playNextChunkFromQueue(); } else if (typeof event.data === 'string') { try { const message = JSON.parse(event.data); if (message.type === 'text') { console.log('Server Text:', message.data); logDebug(`Gemini: ${message.data.substring(0, 50)}...`); } else { console.warn("Unknown JSON:", message); } } catch (e) { console.error("Non-JSON text:", event.data, e); } } else { console.warn("Unknown msg type:", typeof event.data); } };
+                webSocket.onerror = (event) => { console.error('WS error:', event); updateStatus('WS error.', 'error'); stopSession(); };
+                webSocket.onclose = (event) => { console.log(`WS closed: ${event.code}`); if (statusDiv.textContent !== 'Status: Idle') updateStatus('Stopped (WS closed).', 'info'); stopSession(); };
+            } catch (err) { console.error("Setup error:", err); let msg = `Error: ${err.name}.`; if (err.name === "NotAllowedError") msg = "Error: Permission denied."; else if (err.name === "NotFoundError") msg = "Error: Mic/Screen not found."; updateStatus(msg, 'error'); stopSession(); }
+        }
+
+        // --- Audio Capture (Worklet) ---
+        async function setupAudioCapture_Worklet() {
+            if (!audioStream || !webSocket || !audioProcessorUrl) { logDebug("Audio capture prereqs failed."); updateStatus('Audio setup error.', 'error'); return false; }
+            try {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                captureAudioContext = new AudioContext({ sampleRate: AUDIO_INPUT_SAMPLE_RATE });
+                logDebug(`Capture AC rate: ${captureAudioContext.sampleRate}Hz.`);
+                if (captureAudioContext.sampleRate !== AUDIO_INPUT_SAMPLE_RATE) console.warn("Capture Sample rate mismatch!");
+
+                // *** This is where the SyntaxError likely occurred ***
+                await captureAudioContext.audioWorklet.addModule(audioProcessorUrl);
+                logDebug("Worklet module added."); // This log won't appear if addModule fails
+
+                audioSourceNode = captureAudioContext.createMediaStreamSource(audioStream);
+                audioProcessorNode = new AudioWorkletNode(captureAudioContext, 'audio-processor');
+                logDebug("Worklet node created.");
+                audioProcessorNode.port.onmessage = (event) => { if (!isPlaybackActive && webSocket?.readyState === WebSocket.OPEN) webSocket.send(event.data); };
+                audioSourceNode.connect(audioProcessorNode);
+                // Do NOT connect processor to destination for capture-only
+                logDebug("Audio capture pipeline connected.");
+                return true; // Success
+            } catch (err) { console.error("Audio Worklet setup error:", err); updateStatus(`Audio setup error: ${err.message}`, 'error'); return false; } // Return false on error
+        }
+
+        // --- Audio Playback (Unchanged) ---
+        function int16BufferToFloat32Array(buffer) { /* ... (same as before) ... */ const input = new Int16Array(buffer); const output = new Float32Array(input.length); for (let i = 0; i < input.length; i++) { const int = input[i]; const float = (int >= 0x8000) ? -(0x10000 - int) / 0x8000 : int / 0x7FFF; output[i] = float; } return output; }
+        async function playNextChunkFromQueue() { /* ... (same as before) ... */ if (isPlaying || playbackQueue.length === 0 || !playbackAudioContext || playbackAudioContext.state === 'closed') return; isPlaying = true; isPlaybackActive = true; updateStatus("Playing response...", "playing"); logDebug(`Playback starting. Queue: ${playbackQueue.length}`); const audioChunk = playbackQueue.shift(); try { const pcmFloat32 = int16BufferToFloat32Array(audioChunk); const frameCount = pcmFloat32.length; if (frameCount === 0) { console.warn("Empty playback chunk."); isPlaying = false; isPlaybackActive = false; setTimeout(playNextChunkFromQueue, 0); return; } const audioBuffer = playbackAudioContext.createBuffer(1, frameCount, playbackAudioContext.sampleRate); audioBuffer.getChannelData(0).set(pcmFloat32); const sourceNode = playbackAudioContext.createBufferSource(); sourceNode.buffer = audioBuffer; sourceNode.connect(playbackAudioContext.destination); sourceNode.onended = () => { isPlaying = false; if (playbackQueue.length > 0) { setTimeout(playNextChunkFromQueue, 0); } else { logDebug("Playback queue empty."); updateStatus("Session active. Listening...", "success"); isPlaybackActive = false; } }; sourceNode.start(0); } catch (error) { console.error("Playback error:", error); updateStatus("Playback error.", "error"); isPlaying = false; isPlaybackActive = false; } }
+
+        // --- Snapshots (Unchanged) ---
+        function startSnapshots() { /* ... (same as before) ... */ if (snapshotIntervalId) clearInterval(snapshotIntervalId); logDebug(`Starting snapshots every ${SNAPSHOT_INTERVAL_MS}ms.`); snapshotIntervalId = setInterval(async () => { if (!screenStream?.active || !webSocket || webSocket.readyState !== WebSocket.OPEN) return; try { const videoWidth = screenVideoElement.videoWidth, videoHeight = screenVideoElement.videoHeight; if (videoWidth === 0 || videoHeight === 0) return; let targetWidth = videoWidth, targetHeight = videoHeight; if (targetWidth > SNAPSHOT_MAX_WIDTH) { const ratio = SNAPSHOT_MAX_WIDTH / targetWidth; targetWidth = SNAPSHOT_MAX_WIDTH; targetHeight = Math.floor(targetHeight * ratio); } canvasElement.width = targetWidth; canvasElement.height = targetHeight; canvasCtx.drawImage(screenVideoElement, 0, 0, targetWidth, targetHeight); const jpegBase64 = canvasElement.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1]; if (jpegBase64 && webSocket?.readyState === WebSocket.OPEN) { webSocket.send(JSON.stringify({ type: "image", mime_type: "image/jpeg", data: jpegBase64 })); logDebug(`Sent snapshot (${targetWidth}x${targetHeight}, ~${Math.round(jpegBase64.length*0.75/1024)}kB)`); } } catch (err) { console.error("Snapshot error:", err); logDebug(`Snapshot error: ${err.message}`); } }, SNAPSHOT_INTERVAL_MS); }
+
+        // --- Stop Logic (Unchanged) ---
+        function stopSession() { /* ... (same as before) ... */ console.log("Stopping session..."); clearInterval(snapshotIntervalId); snapshotIntervalId = null; isPlaybackActive = false; isPlaying = false; playbackQueue = []; if (audioProcessorNode) { audioProcessorNode.disconnect(); audioProcessorNode.port.close(); audioProcessorNode = null; } if (audioSourceNode) { audioSourceNode.disconnect(); audioSourceNode = null; } if (captureAudioContext?.state !== 'closed') { captureAudioContext.close().catch(e => console.error("Capture AC close err:", e)); captureAudioContext = null; } if (playbackAudioContext?.state !== 'closed') { playbackAudioContext.close().catch(e => console.error("Playback AC close err:", e)); playbackAudioContext = null; } if (webSocket?.readyState === WebSocket.OPEN) { webSocket.close(1000, "Client stop"); } webSocket = null; audioStream?.getTracks().forEach(t => t.stop()); screenStream?.getTracks().forEach(t => t.stop()); audioStream = null; screenStream = null; screenVideoElement.srcObject = null; updateStatus('Idle', 'info'); startButton.disabled = false; stopButton.disabled = true; logDebug("Stopped."); }
+
+        // --- Event Listeners ---
+        startButton.addEventListener('click', startSession);
+        stopButton.addEventListener('click', stopSession);
+
+        // --- Initial Check & Worklet URL Creation ---
+        window.addEventListener('load', () => { /* (Same checks as before) */ });
+    </script>
+
+    <script id="audio-processor-worklet" type="javascript/worklet">
+        // audio-processor.js (Corrected Syntax)
+        class AudioProcessor extends AudioWorkletProcessor {
+            constructor(options) {
+                super(options);
+                this.bufferSize = 4096; // Process in chunks
+                this.buffer = new Int16Array(this.bufferSize);
+                this.bufferIndex = 0;
+                // Check sample rate if possible (global 'sampleRate' is defined by AudioWorkletGlobalScope)
+                // Note: sampleRate might not be available immediately in constructor in all implementations.
+                try {
+                    if (typeof sampleRate !== 'undefined' && sampleRate !== 16000) {
+                        console.warn(`Worklet running at ${sampleRate}Hz, expected 16000Hz.`);
+                    } else if (typeof sampleRate === 'undefined') {
+                        console.warn("Worklet initial sampleRate global scope variable not found.");
+                    }
+                } catch(e) { console.warn("Error accessing sampleRate in worklet constructor:", e); }
+            }
+
+            process(inputs, outputs, parameters) {
+                const input = inputs[0]; // Get the first input (array of channels)
+                // Expecting mono input based on getUserMedia constraints
+                if (!input || input.length === 0 || !input[0]) {
+                    // No input data on the expected channel
+                    return true; // Keep processor alive
+                }
+                const inputChannelData = input[0]; // Float32Array data for the first channel
+
+                // Convert Float32 [-1, 1] to Int16 [-32768, 32767] and buffer
+                for (let i = 0; i < inputChannelData.length; i++) {
+                    const s = Math.max(-1, Math.min(1, inputChannelData[i]));
+                    // Correct scaling for Int16
+                    this.buffer[this.bufferIndex++] = s < 0 ? s * 32768 : s * 32767;
+
+                    // When buffer is full, send it
+                    if (this.bufferIndex === this.bufferSize) {
+                        // Post a *copy* of the buffer's underlying ArrayBuffer
+                        // slice(0) creates a copy - important as buffer will be reused
+                        this.port.postMessage(this.buffer.buffer.slice(0));
+                        this.bufferIndex = 0; // Reset buffer index
+                    }
+                } // *** Added missing closing brace for 'for' loop ***
+
+                // Keep processor alive
+                return true;
+            } // *** Added missing closing brace for 'process' method ***
+        } // *** Added missing closing brace for 'AudioProcessor' class ***
+
+        try {
+             registerProcessor('audio-processor', AudioProcessor);
+        } catch (e) {
+             console.error("Failed to register AudioWorklet processor:", e)
+        }
+    </script>
+    <script>
+        // (Same Blob URL creation code as before)
+        try { const workletScript = document.getElementById('audio-processor-worklet').textContent; const blob = new Blob([workletScript], { type: 'application/javascript' }); audioProcessorUrl = URL.createObjectURL(blob); console.log("AudioWorklet Blob URL created."); } catch(e) { console.error("Failed to create AudioWorklet Blob URL:", e); updateStatus("Error: Failed to setup AudioWorklet.", "error"); }
+    </script>
+</body>
+</html>
