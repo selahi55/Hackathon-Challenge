@@ -124,10 +124,11 @@
 
      <script>
         // --- Configuration ---
+        window.resizeBy(600, 450)
         const FASTAPI_WS_URL = 'ws://127.0.0.1:8000/ws/stream';
         const AUDIO_INPUT_SAMPLE_RATE = 16000; // Rate we capture and send
         const AUDIO_PLAYBACK_SAMPLE_RATE = 24000; // Rate we EXPECT from Gemini/Server (adjust if needed)
-        const SNAPSHOT_INTERVAL_MS = 8000;
+        const SNAPSHOT_INTERVAL_MS = 1000;
         const JPEG_QUALITY = 0.6;
         const SNAPSHOT_MAX_WIDTH = 1024;
 
