@@ -21,7 +21,13 @@ from concurrent.futures import ThreadPoolExecutor
 # Configuration & Constants
 # ==============================================================================
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyB7JSR-1Y5ycRDrBqzVTLQmQC6g-PKZjBw")  # Replace with your actual API key
+# Add Google Search API constants
+# Replace with your actual API key or use environment variables
+GOOGLE_SEARCH_API_KEY = os.environ.get("GOOGLE_SEARCH_API_KEY", "AIzaSyB7JSR-1Y5ycRDrBqzVTLQmQC6g-PKZjBw")
+GOOGLE_SEARCH_ENGINE_ID = os.environ.get("GOOGLE_SEARCH_ENGINE_ID", "0018ac0bdf4c44bd0")  # You'll get this from the steps below
+GOOGLE_SEARCH_BASE_URL = "https://www.googleapis.com/customsearch/v1"
+
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -29,6 +35,27 @@ logger = logging.getLogger(__name__)
 LIVE_API_MODEL = "models/gemini-2.0-flash-live-001"
 LIVE_API_VERSION = "v1beta"
 AUDIO_SAMPLE_RATE = 16000  # Input sample rate from client
+
+# --- Google Search API Configuration ---    
+tools = [
+    types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="get_bunq_how_to_steps",
+                description="Get Bunq account how to steps from bunq.com, that give you step by step instructions.",
+                parameters=genai.types.Schema(
+                    type = genai.types.Type.OBJECT,
+                    properties = {
+                        "query": genai.types.Schema(
+                            type = genai.types.Type.STRING,
+                            description = "The query to search for on bunq.com."
+                        ),
+                    },
+                ),
+            ),
+        ]
+    ),
+]
 
 # --- LiveConnect Config ---
 # Request both audio and text responses from Gemini
@@ -41,6 +68,7 @@ try:
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Puck")
             )
         ),
+        tools=tools,
     )
     logger.info(f"LiveConnectConfig created successfully: {LIVE_CONFIG}")
 except Exception as e:
@@ -54,6 +82,10 @@ MAX_CONCURRENT_SESSIONS = 10
 # Initialization
 # ==============================================================================
 assert GOOGLE_API_KEY, "GOOGLE_API_KEY environment variable not set."
+assert GOOGLE_SEARCH_API_KEY , "GOOGLE_SEARCH_API_KEY environment variable not set."
+assert GOOGLE_SEARCH_ENGINE_ID , "GOOGLE_SEARCH_ENGINE_ID environment variable not set."
+assert GOOGLE_SEARCH_BASE_URL , "GOOGLE_SEARCH_BASE_URL environment variable not set."
+
 
 # --- Initialize Gemini Client ---
 client = None
@@ -77,6 +109,103 @@ app.add_middleware(
 )
 
 session_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SESSIONS)
+
+# ==============================================================================
+# Google Search API Configuration
+# ==============================================================================
+
+
+# Function to perform Google search and retrieve content
+def google_search(query, site_restriction=None):
+    """
+    Performs a Google search with the specified query and retrieves content from the first result.
+    If site_restriction is provided, the search is limited to that site.
+    
+    Returns:
+        A dictionary containing the search result and the page content
+    """
+    search_query = query
+    if site_restriction:
+        search_query = f"site:{site_restriction} {query}"
+    
+    params = {
+        'key': GOOGLE_SEARCH_API_KEY,
+        'cx': GOOGLE_SEARCH_ENGINE_ID,
+        'q': search_query
+    }
+    
+    try:
+        # Search for results
+        search_response = requests.get(GOOGLE_SEARCH_BASE_URL, params=params)
+        search_response.raise_for_status()
+        search_data = search_response.json()
+        
+        # Check if we have search results
+        if "items" not in search_data or not search_data["items"]:
+            return {"error": "No search results found"}
+        
+        # Get the first result URL
+        first_result = search_data["items"][0]
+        url = first_result.get("link")
+        
+        # Get metadata from the search result
+        metadata = {
+            "title": first_result.get("title", "No title"),
+            "snippet": first_result.get("snippet", "No description"),
+            "url": url
+        }
+        
+        # Retrieve the content from the URL
+        if url:
+            try:
+                content_response = requests.get(url)
+                content_response.raise_for_status()
+                
+                # Parse HTML content
+                soup = BeautifulSoup(content_response.text, 'html.parser')
+                
+                # Extract content under the div with class 'Post-body'
+                post_body_div = soup.find('div', class_='Post-body')
+                text = post_body_div.get_text(separator=' ', strip=True) if post_body_div else "No content found"
+                
+                # Clean text (remove excessive whitespace)
+                text = ' '.join(text.split())
+                
+                print(f"Retrieved content from {url}")
+                print(f"Title: {metadata['title']}")
+                print(f"Snippet: {metadata['snippet']}")
+                print(f"Content: {text[:500]}...")  # Print first 500 characters of content  
+
+                return {
+                    "metadata": metadata,
+                    "content": text[:5000],  # Limit content length to prevent very large responses
+                    "all_results": search_data["items"][:5]  # Include top 5 results for reference
+                }
+            except requests.RequestException as e:
+                return {
+                    "metadata": metadata,
+                    "error": f"Error retrieving content: {str(e)}",
+                    "all_results": search_data["items"][:5]
+                }
+        else:
+            return {"error": "No URL found in search results"}
+            
+    except requests.RequestException as e:
+        print(f"Google Search API error: {e}")
+        return {"error": str(e)}
+
+# Function handler for get_bunq_how_to_steps
+def get_bunq_how_to_steps(query):
+    """
+    Searches for Bunq how-to steps on together.bunq.com using Google Search API
+    and retrieves the content from the first result.
+    """
+    search_result = google_search(query, "together.bunq.com")
+    
+    if "error" in search_result:
+        return {"results": f"Error: {search_result['error']}"}
+    
+    return {"results": search_result}
 
 
 # ==============================================================================
