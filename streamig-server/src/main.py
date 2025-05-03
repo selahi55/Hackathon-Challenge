@@ -262,6 +262,16 @@ def google_search(query, site_restriction=None):
                 logging.info(f"Title: {metadata['title']}")
                 logging.info(f"Snippet: {metadata['snippet']}")
                 logging.info(f"Content: {text[:500]}...")  # Print first 500 characters of content
+                
+                # Print all data in search items array
+                logging.info("All search items:")
+                for idx, item in enumerate(search_data.get("items", [])):
+                    logging.info(f"Search Result #{idx+1}:")
+                    for key, value in item.items():
+                        if isinstance(value, dict):
+                            logging.info(f"  {key}: {json.dumps(value)}")
+                        else:
+                            logging.info(f"  {key}: {value}")
 
                 return {
                     "metadata": metadata,
